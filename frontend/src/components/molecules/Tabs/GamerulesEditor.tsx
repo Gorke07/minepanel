@@ -22,6 +22,8 @@ export const GamerulesEditor: FC<GamerulesEditorProps> = ({ serverId, rconPort, 
   const [supported, setSupported] = useState(true);
   const [complete, setComplete] = useState(true);
   const latestRequest = useRef(0);
+  // The server a pending command was sent to may no longer be the one on screen.
+  const currentServer = useRef<string | null>(serverId);
   const [loading, setLoading] = useState(false);
   const [filter, setFilter] = useState("");
 
@@ -47,8 +49,17 @@ export const GamerulesEditor: FC<GamerulesEditorProps> = ({ serverId, rconPort, 
     load();
   }, [load]);
 
+  useEffect(() => {
+    currentServer.current = serverId;
+    return () => {
+      currentServer.current = null;
+    };
+  }, [serverId]);
+
   const setRule = async (name: string, value: string) => {
-    const result = await executeServerCommand(serverId, { command: `gamerule ${name} ${value}`, rconPort, rconPassword });
+    const target = serverId;
+    const result = await executeServerCommand(target, { command: `gamerule ${name} ${value}`, rconPort, rconPassword });
+    if (currentServer.current !== target) return;
     if (!result.success) {
       mcToast.error(result.output);
       return;
@@ -59,6 +70,17 @@ export const GamerulesEditor: FC<GamerulesEditorProps> = ({ serverId, rconPort, 
   };
 
   if (!supported) return null;
+
+  const commitDraft = (name: string, value: string) => {
+    const draft = drafts[name];
+    if (draft === undefined || draft === value) return;
+    if (/^[\w.:-]+$/.test(draft)) {
+      setRule(name, draft);
+    } else {
+      // Invalid input: drop the draft so the field shows the saved value again.
+      setDrafts(({ [name]: _, ...rest }) => rest);
+    }
+  };
 
   const visible = rules.filter((rule) => rule.name.toLowerCase().includes(filter.toLowerCase()));
 
@@ -89,7 +111,7 @@ export const GamerulesEditor: FC<GamerulesEditorProps> = ({ serverId, rconPort, 
                   type={/^-?\d+$/.test(value) ? "number" : "text"}
                   value={drafts[name] ?? value}
                   onChange={(e) => setDrafts((current) => ({ ...current, [name]: e.target.value }))}
-                  onBlur={() => drafts[name] !== undefined && drafts[name] !== value && /^[\w.:-]+$/.test(drafts[name]) && setRule(name, drafts[name])}
+                  onBlur={() => commitDraft(name, value)}
                   onKeyDown={(e) => e.key === "Enter" && e.currentTarget.blur()}
                   aria-label={name}
                   className="w-24 h-7 text-xs bg-gray-900/60 border-gray-700/50 text-gray-200"
