@@ -330,6 +330,45 @@ describe('ScheduledTasksService', () => {
       expect(task.announcementIndex).toBe(1);
     });
 
+    it('keeps the 1024 limit for command tasks only', async () => {
+      await expect(service.create('srv', { name: 'c', type: 'command', command: 'say ' + 'x'.repeat(1021), intervalMinutes: 5 } as any)).rejects.toThrow('at most 1024');
+      const long = Array(20).fill('m'.repeat(200)).join('\n');
+      expect((await service.create('srv', { name: 'a', type: 'announce', command: long, intervalMinutes: 5 } as any)).command).toBe(long);
+    });
+
+    it('skips Bedrock servers without advancing the rotation', async () => {
+      const task = owned({ announcementIndex: 1 });
+      taskRepo.findOne.mockResolvedValue(task);
+      dockerCompose.getServerConfig.mockResolvedValue({ edition: 'BEDROCK', rconPort: '25575' });
+
+      await service.runNow('srv', 7);
+
+      expect(serverManagement.executeCommand).not.toHaveBeenCalled();
+      expect(task.lastResult).toBe('Announcement skipped: announcements are only supported on Java servers');
+      expect(task.announcementIndex).toBe(1);
+    });
+
+    it('never runs the same task twice at once', async () => {
+      const task = owned();
+      taskRepo.findOne.mockResolvedValue(task);
+      dockerCompose.getServerConfig.mockResolvedValue({ rconPort: '25575' });
+      let release!: () => void;
+      serverManagement.executeCommand.mockReturnValueOnce(new Promise((resolve) => (release = () => resolve({ success: true, output: '' }))));
+
+      const first = service.runNow('srv', 7);
+      await new Promise((resolve) => setImmediate(resolve));
+      await service.runNow('srv', 7);
+      release();
+      await first;
+
+      expect(serverManagement.executeCommand).toHaveBeenCalledTimes(1);
+      expect(task.announcementIndex).toBe(1);
+      // Once finished, the task can run again.
+      serverManagement.executeCommand.mockResolvedValueOnce({ success: true, output: '' });
+      await service.runNow('srv', 7);
+      expect(task.announcementIndex).toBe(2);
+    });
+
     it('reports an empty list and resets the rotation when the messages change', async () => {
       const empty = owned({ command: '' });
       taskRepo.findOne.mockResolvedValueOnce(empty);
@@ -340,6 +379,12 @@ describe('ScheduledTasksService', () => {
       taskRepo.findOne.mockResolvedValueOnce(task);
       await service.update('srv', 7, { command: 'new one' } as any);
       expect(task.announcementIndex).toBe(0);
+
+      // Switching type with the same text also starts over.
+      const retyped = owned({ type: 'command', command: 'say hi', announcementIndex: 3 });
+      taskRepo.findOne.mockResolvedValueOnce(retyped);
+      await service.update('srv', 7, { type: 'announce' } as any);
+      expect(retyped.announcementIndex).toBe(0);
     });
   });
 });

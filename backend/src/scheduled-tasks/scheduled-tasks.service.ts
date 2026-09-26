@@ -11,6 +11,7 @@ import { DockerComposeService } from 'src/docker-compose/docker-compose.service'
 const CHECK_INTERVAL_MS = 30_000;
 const MAX_ANNOUNCEMENTS = 20;
 const MAX_ANNOUNCEMENT_LENGTH = 256;
+const MAX_COMMAND_LENGTH = 1024;
 
 export const announcementLines = (text: string | null | undefined): string[] =>
   (text ?? '')
@@ -29,6 +30,8 @@ export class ScheduledTasksService implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(ScheduledTasksService.name);
   private timer: NodeJS.Timeout | null = null;
   private running = false;
+  // Task ids being executed, so "Run now" and the timer never run the same task at once.
+  private readonly inFlight = new Set<number>();
 
   constructor(
     @InjectRepository(ScheduledTask)
@@ -87,12 +90,13 @@ export class ScheduledTasksService implements OnModuleInit, OnModuleDestroy {
     const nextCron = dto.cronExpression ?? task.cronExpression ?? undefined;
     this.assertSchedulePayload(nextKind, nextInterval, nextCron);
 
+    const previousType = task.type;
     if (dto.name !== undefined) task.name = dto.name;
     if (dto.type !== undefined) task.type = dto.type;
     if (dto.command !== undefined || dto.type !== undefined) {
       const command = nextType === 'restart' ? null : (nextCommand ?? null);
       // A new message list starts over from its first message.
-      if (command !== task.command || nextType !== task.type) task.announcementIndex = 0;
+      if (command !== task.command || nextType !== previousType) task.announcementIndex = 0;
       task.command = command;
     }
 
@@ -146,6 +150,10 @@ export class ScheduledTasksService implements OnModuleInit, OnModuleDestroy {
   }
 
   private async executeTask(task: ScheduledTask): Promise<void> {
+    if (this.inFlight.has(task.id)) {
+      return;
+    }
+    this.inFlight.add(task.id);
     try {
       if (task.type === 'restart') {
         const ok = await this.serverManagement.restartServer(task.serverId);
@@ -161,7 +169,7 @@ export class ScheduledTasksService implements OnModuleInit, OnModuleDestroy {
     } finally {
       task.lastRunAt = new Date();
       task.nextRunAt = this.computeNextRun(task);
-      await this.taskRepo.save(task);
+      await this.taskRepo.save(task).finally(() => this.inFlight.delete(task.id));
     }
   }
 
@@ -169,6 +177,11 @@ export class ScheduledTasksService implements OnModuleInit, OnModuleDestroy {
     const messages = announcementLines(task.command);
     if (messages.length === 0) {
       return 'No messages configured';
+    }
+    // Bedrock has no working command path yet; "sent" there would silently skip messages.
+    const config = await this.dockerComposeService.getServerConfig(task.serverId);
+    if (config?.edition === 'BEDROCK') {
+      return 'Announcement skipped: announcements are only supported on Java servers';
     }
     const index = (task.announcementIndex ?? 0) % messages.length;
     const result = await this.executeCommandTask(task, announcementCommand(messages[index]));
@@ -206,6 +219,9 @@ export class ScheduledTasksService implements OnModuleInit, OnModuleDestroy {
   private assertCommandPayload(type: string, command: string | undefined): void {
     if (type === 'command' && (!command || !command.trim())) {
       throw new BadRequestException('command is required when type is "command"');
+    }
+    if (type === 'command' && command.length > MAX_COMMAND_LENGTH) {
+      throw new BadRequestException(`command must be at most ${MAX_COMMAND_LENGTH} characters`);
     }
     if (type !== 'announce') return;
     const messages = announcementLines(command);
