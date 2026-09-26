@@ -9,6 +9,20 @@ import { ServerManagementService } from 'src/server-management/server-management
 import { DockerComposeService } from 'src/docker-compose/docker-compose.service';
 
 const CHECK_INTERVAL_MS = 30_000;
+const MAX_ANNOUNCEMENTS = 20;
+const MAX_ANNOUNCEMENT_LENGTH = 256;
+
+export const announcementLines = (text: string | null | undefined): string[] =>
+  (text ?? '')
+    .split('\n')
+    .map((line) => line.trim())
+    .filter(Boolean);
+
+// `tellraw` instead of `say`, so the message is not prefixed with [Server]. The text
+// goes through JSON.stringify, so quotes or braces in a message cannot break out of it.
+// &-codes become § so admins can colour messages the way they do in plugin configs.
+export const announcementCommand = (message: string): string =>
+  `tellraw @a ${JSON.stringify({ text: message.replace(/&([0-9a-fk-or])/gi, '§$1') })}`;
 
 @Injectable()
 export class ScheduledTasksService implements OnModuleInit, OnModuleDestroy {
@@ -49,7 +63,7 @@ export class ScheduledTasksService implements OnModuleInit, OnModuleDestroy {
       serverId,
       name: dto.name,
       type: dto.type,
-      command: dto.type === 'command' ? dto.command : null,
+      command: dto.type === 'restart' ? null : dto.command,
       scheduleKind,
       intervalMinutes: scheduleKind === 'interval' ? dto.intervalMinutes : null,
       cronExpression: scheduleKind === 'cron' ? dto.cronExpression : null,
@@ -76,7 +90,10 @@ export class ScheduledTasksService implements OnModuleInit, OnModuleDestroy {
     if (dto.name !== undefined) task.name = dto.name;
     if (dto.type !== undefined) task.type = dto.type;
     if (dto.command !== undefined || dto.type !== undefined) {
-      task.command = nextType === 'command' ? (nextCommand ?? null) : null;
+      const command = nextType === 'restart' ? null : (nextCommand ?? null);
+      // A new message list starts over from its first message.
+      if (command !== task.command || nextType !== task.type) task.announcementIndex = 0;
+      task.command = command;
     }
 
     const scheduleChanged = nextKind !== task.scheduleKind || (nextKind === 'interval' && nextInterval !== task.intervalMinutes) || (nextKind === 'cron' && nextCron !== task.cronExpression);
@@ -133,6 +150,8 @@ export class ScheduledTasksService implements OnModuleInit, OnModuleDestroy {
       if (task.type === 'restart') {
         const ok = await this.serverManagement.restartServer(task.serverId);
         task.lastResult = ok ? 'Server restarted' : 'Failed to restart server';
+      } else if (task.type === 'announce') {
+        task.lastResult = await this.executeAnnouncementTask(task);
       } else {
         task.lastResult = await this.executeCommandTask(task);
       }
@@ -146,8 +165,23 @@ export class ScheduledTasksService implements OnModuleInit, OnModuleDestroy {
     }
   }
 
-  private async executeCommandTask(task: ScheduledTask): Promise<string> {
-    if (!task.command) {
+  private async executeAnnouncementTask(task: ScheduledTask): Promise<string> {
+    const messages = announcementLines(task.command);
+    if (messages.length === 0) {
+      return 'No messages configured';
+    }
+    const index = (task.announcementIndex ?? 0) % messages.length;
+    const result = await this.executeCommandTask(task, announcementCommand(messages[index]));
+    // Advance only when the message went out, so a stopped server does not skip one.
+    if (!result.startsWith('Command failed') && !result.startsWith('Command skipped')) {
+      task.announcementIndex = (index + 1) % messages.length;
+      return `Announced ${index + 1}/${messages.length}: ${messages[index]}`;
+    }
+    return result;
+  }
+
+  private async executeCommandTask(task: ScheduledTask, command = task.command): Promise<string> {
+    if (!command) {
       return 'No command configured';
     }
 
@@ -157,7 +191,7 @@ export class ScheduledTasksService implements OnModuleInit, OnModuleDestroy {
       return 'Command skipped: RCON port not configured for this server';
     }
 
-    const result = await this.serverManagement.executeCommand(task.serverId, task.command, rconPort, config?.rconPassword);
+    const result = await this.serverManagement.executeCommand(task.serverId, command, rconPort, config?.rconPassword);
     return result.success ? result.output || 'Command executed' : `Command failed: ${result.output}`;
   }
 
@@ -172,6 +206,17 @@ export class ScheduledTasksService implements OnModuleInit, OnModuleDestroy {
   private assertCommandPayload(type: string, command: string | undefined): void {
     if (type === 'command' && (!command || !command.trim())) {
       throw new BadRequestException('command is required when type is "command"');
+    }
+    if (type !== 'announce') return;
+    const messages = announcementLines(command);
+    if (messages.length === 0) {
+      throw new BadRequestException('At least one message is required when type is "announce"');
+    }
+    if (messages.length > MAX_ANNOUNCEMENTS) {
+      throw new BadRequestException(`At most ${MAX_ANNOUNCEMENTS} messages are allowed`);
+    }
+    if (messages.some((message) => message.length > MAX_ANNOUNCEMENT_LENGTH)) {
+      throw new BadRequestException(`Each message must be at most ${MAX_ANNOUNCEMENT_LENGTH} characters`);
     }
   }
 
