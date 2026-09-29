@@ -511,10 +511,12 @@ describe('ServerManagementService lifecycle', () => {
 
     it('executeCommand on Bedrock only reports delivery', async () => {
       compose = COMPOSE_BEDROCK;
-      route(/Commands not supported/, { stdout: '', stderr: '' });
-      expect(await service.executeCommand('srv', 'list', '19132')).toEqual({ success: true, output: 'Command sent (output visible in server logs)' });
-      route(/Commands not supported/, { stdout: '', stderr: 'permission denied' });
+      spawnQueue.push({ stdout: '', exitCode: 0 });
+      expect(await service.executeCommand('srv', 'say  hi', '19132')).toEqual({ success: true, output: 'Command sent (output visible in server logs)' });
+      spawnQueue.push({ stderr: 'permission denied', exitCode: 1 });
       expect(await service.executeCommand('srv', 'list', '19132')).toEqual({ success: false, output: 'Execution failed: permission denied' });
+      spawnQueue.push({ stderr: '', exitCode: 2 });
+      expect(await service.executeCommand('srv', 'list', '19132')).toEqual({ success: false, output: 'Execution failed: send-command exited with code 2' });
 
       expect(await service.executeCommand('bad id', 'list', '1')).toEqual({ success: false, output: 'Invalid server ID' });
       existing = [];

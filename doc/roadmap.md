@@ -124,8 +124,7 @@ Smaller, high-value items that fit the current single-node architecture.
 
 ### Bedrock console commands
 
-- Re-enable command execution for Bedrock servers (currently disabled due to
-  TTY/permission issues with `send-command`)
+- ~~Re-enable command execution for Bedrock servers~~ ✅ Shipped (console runs `send-command` in the container; output appears in the Logs tab)
 
 ### File manager
 

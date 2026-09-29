@@ -38,10 +38,6 @@ const DOCKER_COMMANDS = {
   // Single command to get all running containers stats at once (much faster)
   STATS_ALL: String.raw`docker stats --no-stream --format "{{.Container}}\t{{.Name}}\t{{.CPUPerc}}\t{{.MemUsage}}"`,
   LOGS: (containerId: string, lines: number) => `docker logs --tail ${lines} --timestamps ${containerId} 2>&1`,
-  // Bedrock: TODO - commands disabled due to TTY/permission issues with send-command
-  EXEC_BEDROCK: (_containerId: string, _command: string) => {
-    return `echo "Commands not supported for Bedrock servers yet"`;
-  },
   RESTIC_SNAPSHOTS: (serverId: string) => `docker exec ${serverId}-backup restic snapshots --json`,
   // `name=` matches substrings, so it would also catch other stacks' volumes.
   VOLUME_LIST: (project: string) => `docker volume ls --filter "label=com.docker.compose.project=${project}" --format "{{.Name}}"`,
@@ -1836,13 +1832,14 @@ export class ServerManagementService {
 
       // Use different command execution based on edition
       if (edition === 'BEDROCK') {
-        // Bedrock uses send-command script (output only visible in container logs)
-        const { stderr } = await execAsync(DOCKER_COMMANDS.EXEC_BEDROCK(containerId, normalizedCommand));
+        // itzg's send-command feeds the server console; needs no TTY. Args go straight to docker, never through a shell.
+        const { stderr, exitCode } = await this.executeProcess('docker', ['exec', containerId, 'send-command', ...normalizedCommand.split(/\s+/)], { timeout: 10_000 });
         const sanitizedStderr = this.sanitizeCommandOutput(stderr || '');
 
-        if (sanitizedStderr) {
-          this.logger.warn(`Command execution error on ${serverId}: ${sanitizedStderr}`);
-          return { success: false, output: `Execution failed: ${sanitizedStderr}` };
+        if (sanitizedStderr || exitCode !== 0) {
+          const reason = sanitizedStderr || `send-command exited with code ${exitCode}`;
+          this.logger.warn(`Command execution error on ${serverId}: ${reason}`);
+          return { success: false, output: `Execution failed: ${reason}` };
         }
 
         this.logger.log(`Bedrock command executed on ${serverId}: ${normalizedCommand}`);
@@ -2103,7 +2100,7 @@ export class ServerManagementService {
       }
 
       // Send list command
-      await execAsync(DOCKER_COMMANDS.EXEC_BEDROCK(containerId, 'list'));
+      await this.executeProcess('docker', ['exec', containerId, 'send-command', 'list'], { timeout: 10_000 });
 
       // Wait for command to process
       await new Promise((resolve) => setTimeout(resolve, 500));
